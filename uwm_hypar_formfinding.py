@@ -1,10 +1,20 @@
 import numpy as np
 from dataclasses import dataclass
-from mpi4py import MPI
-from dolfinx import mesh
-import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 import plotly.graph_objects as go
+
+try:
+    import scipy.sparse as sp
+    import scipy.sparse.linalg as spla
+    HAVE_SCIPY = True
+except Exception:
+    HAVE_SCIPY = False
+
+try:
+    from mpi4py import MPI
+    from dolfinx import mesh
+    HAVE_DOLFINX = True
+except Exception:
+    HAVE_DOLFINX = False
 
 
 @dataclass
@@ -164,7 +174,7 @@ def assemble_weighted_laplacian(
     membrane_weights: np.ndarray,
     cables: np.ndarray,
     cable_weights: np.ndarray,
-) -> sp.csr_matrix:
+) -> np.ndarray:
     rows = []
     cols = []
     data = []
@@ -183,7 +193,12 @@ def assemble_weighted_laplacian(
             break
         add_edge(int(a), int(b), float(cable_weights[i]))
 
-    L = sp.coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
+    if HAVE_SCIPY:
+        L = sp.coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
+    else:
+        L = np.zeros((n_nodes, n_nodes), dtype=float)
+        for r, c, v in zip(rows, cols, data):
+            L[r, c] += v
     return L
 
 
@@ -205,8 +220,12 @@ def solve_equilibrium(
         return coords_seed.copy()
 
     L = assemble_weighted_laplacian(n_nodes, triangles, membrane_weights, cables, cable_weights)
-    L_ff = L[free_nodes][:, free_nodes]
-    L_fb = L[free_nodes][:, fixed_nodes]
+    if HAVE_SCIPY:
+        L_ff = L[free_nodes][:, free_nodes]
+        L_fb = L[free_nodes][:, fixed_nodes]
+    else:
+        L_ff = L[np.ix_(free_nodes, free_nodes)]
+        L_fb = L[np.ix_(free_nodes, fixed_nodes)]
 
     coords_new = coords_seed.copy()
     if optimise_xyz:
@@ -216,7 +235,13 @@ def solve_equilibrium(
 
     for d in dims:
         rhs = -L_fb @ coords_seed[fixed_nodes, d]
-        coords_new[free_nodes, d] = spla.spsolve(L_ff, rhs)
+        if HAVE_SCIPY:
+            coords_new[free_nodes, d] = spla.spsolve(L_ff, rhs)
+        else:
+            try:
+                coords_new[free_nodes, d] = np.linalg.solve(L_ff, rhs)
+            except np.linalg.LinAlgError:
+                coords_new[free_nodes, d] = np.linalg.lstsq(L_ff, rhs, rcond=None)[0]
 
     return coords_new
 
@@ -514,6 +539,54 @@ def build_plot(
     print(f"Saved interactive plot -> {out_html}")
 
 
+def build_structured_rectangle_mesh(
+    Lx: float,
+    Ly: float,
+    Nx: int,
+    Ny: int,
+):
+    xs = np.linspace(0.0, Lx, Nx + 1)
+    ys = np.linspace(0.0, Ly, Ny + 1)
+
+    def node_id(i: int, j: int) -> int:
+        return j * (Nx + 1) + i
+
+    coords = np.zeros(((Nx + 1) * (Ny + 1), 3), dtype=float)
+    for j, y in enumerate(ys):
+        for i, x in enumerate(xs):
+            coords[node_id(i, j), :2] = [x, y]
+
+    triangles = []
+    for j in range(Ny):
+        for i in range(Nx):
+            n00 = node_id(i, j)
+            n10 = node_id(i + 1, j)
+            n01 = node_id(i, j + 1)
+            n11 = node_id(i + 1, j + 1)
+            triangles.append([n00, n10, n11])
+            triangles.append([n00, n11, n01])
+    triangles = np.array(triangles, dtype=int)
+
+    cables = []
+    for i in range(Nx):
+        cables.append([node_id(i, 0), node_id(i + 1, 0)])      # bottom
+        cables.append([node_id(i, Ny), node_id(i + 1, Ny)])    # top
+    for j in range(Ny):
+        cables.append([node_id(0, j), node_id(0, j + 1)])      # left
+        cables.append([node_id(Nx, j), node_id(Nx, j + 1)])    # right
+    cables = np.array(cables, dtype=int)
+
+    corners = {
+        "SW (0,0)": np.array([node_id(0, 0)], dtype=int),
+        "SE (Lx,0)": np.array([node_id(Nx, 0)], dtype=int),
+        "NW (0,Ly)": np.array([node_id(0, Ny)], dtype=int),
+        "NE (Lx,Ly)": np.array([node_id(Nx, Ny)], dtype=int),
+    }
+
+    boundary_nodes = np.unique(cables.reshape(-1))
+    return coords, triangles, cables, corners, boundary_nodes
+
+
 def main():
     Lx = 4.0
     Ly = 4.0
@@ -533,62 +606,77 @@ def main():
         optimise_xyz=True,
     )
 
-    domain = mesh.create_rectangle(
-        MPI.COMM_WORLD,
-        [[0.0, 0.0], [Lx, Ly]],
-        [Nx, Ny],
-        cell_type=mesh.CellType.triangle,
-    )
+    if HAVE_DOLFINX:
+        domain = mesh.create_rectangle(
+            MPI.COMM_WORLD,
+            [[0.0, 0.0], [Lx, Ly]],
+            [Nx, Ny],
+            cell_type=mesh.CellType.triangle,
+        )
+        if domain.comm.size != 1:
+            raise RuntimeError("This script currently supports a single MPI rank.")
 
-    if domain.comm.size != 1:
-        raise RuntimeError("This script currently supports a single MPI rank.")
+        domain.topology.create_connectivity(2, 0)
+        conn = domain.topology.connectivity(2, 0)
+        triangles = np.array([conn.links(i) for i in range(conn.num_nodes)], dtype=int)
 
-    print(f"Mesh topology dimension: {domain.topology.dim}")
-    print(f"Number of cells (triangles): {domain.topology.index_map(2).size_global}")
-    print(f"Number of nodes: {domain.topology.index_map(0).size_global}")
+        def on_boundary(x):
+            return np.logical_or.reduce(
+                (
+                    np.isclose(x[0], 0.0),
+                    np.isclose(x[0], Lx),
+                    np.isclose(x[1], 0.0),
+                    np.isclose(x[1], Ly),
+                )
+            )
+
+        boundary_facets = mesh.locate_entities_boundary(domain, domain.topology.dim - 1, on_boundary)
+        domain.topology.create_connectivity(1, 0)
+        edge_conn = domain.topology.connectivity(1, 0)
+        cables = np.array([edge_conn.links(i) for i in boundary_facets], dtype=int)
+
+        def corner_SW(x):
+            return np.isclose(x[0], 0.0) & np.isclose(x[1], 0.0)
+
+        def corner_SE(x):
+            return np.isclose(x[0], Lx) & np.isclose(x[1], 0.0)
+
+        def corner_NW(x):
+            return np.isclose(x[0], 0.0) & np.isclose(x[1], Ly)
+
+        def corner_NE(x):
+            return np.isclose(x[0], Lx) & np.isclose(x[1], Ly)
+
+        corners = {
+            "SW (0,0)": mesh.locate_entities(domain, 0, corner_SW),
+            "SE (Lx,0)": mesh.locate_entities(domain, 0, corner_SE),
+            "NW (0,Ly)": mesh.locate_entities(domain, 0, corner_NW),
+            "NE (Lx,Ly)": mesh.locate_entities(domain, 0, corner_NE),
+        }
+        coords = domain.geometry.x
+        print("Mesh backend: FEniCSx/dolfinx")
+    else:
+        coords, triangles, cables, corners, boundary_nodes = build_structured_rectangle_mesh(
+            Lx=Lx,
+            Ly=Ly,
+            Nx=Nx,
+            Ny=Ny,
+        )
+        print("Mesh backend: numpy structured fallback (dolfinx not found)")
+
+    print("Mesh topology dimension: 2")
+    print(f"Number of cells (triangles): {len(triangles)}")
+    print(f"Number of nodes: {coords.shape[0]}")
 
     # Initial hypar surface from corner interpolation
-    coords = domain.geometry.x
     x_coords = coords[:, 0]
     y_coords = coords[:, 1]
     z_coords = H * (x_coords / Lx) * (1 - y_coords / Ly) + H * (1 - x_coords / Lx) * (y_coords / Ly)
-    domain.geometry.x[:, 2] = z_coords
+    coords[:, 2] = z_coords
 
     print("\nCorner heights after warping:")
     print(f"  (0,  0 ) -> z = {z_coords[np.argmin(x_coords**2 + y_coords**2)]:.3f} m")
-
-    def on_boundary(x):
-        return np.logical_or.reduce(
-            (
-                np.isclose(x[0], 0.0),
-                np.isclose(x[0], Lx),
-                np.isclose(x[1], 0.0),
-                np.isclose(x[1], Ly),
-            )
-        )
-
-    boundary_facets = mesh.locate_entities_boundary(domain, domain.topology.dim - 1, on_boundary)
-    print(f"\nBoundary facets (edges): {len(boundary_facets)}")
-
-    # Corner supports (cable-supported square hypar setup)
-    def corner_SW(x):
-        return np.isclose(x[0], 0.0) & np.isclose(x[1], 0.0)
-
-    def corner_SE(x):
-        return np.isclose(x[0], Lx) & np.isclose(x[1], 0.0)
-
-    def corner_NW(x):
-        return np.isclose(x[0], 0.0) & np.isclose(x[1], Ly)
-
-    def corner_NE(x):
-        return np.isclose(x[0], Lx) & np.isclose(x[1], Ly)
-
-    corners = {
-        "SW (0,0)": mesh.locate_entities(domain, 0, corner_SW),
-        "SE (Lx,0)": mesh.locate_entities(domain, 0, corner_SE),
-        "NW (0,Ly)": mesh.locate_entities(domain, 0, corner_NW),
-        "NE (Lx,Ly)": mesh.locate_entities(domain, 0, corner_NE),
-    }
+    print(f"\nBoundary facets (edges): {len(cables)}")
 
     print("\nCorner node heights:")
     corner_ids = []
@@ -596,32 +684,23 @@ def main():
         if len(idx_arr) > 0:
             idx = int(idx_arr[0])
             corner_ids.append(idx)
-            xyz = domain.geometry.x[idx]
+            xyz = coords[idx]
             print(f"  {name} -> node {idx:3d}, coords ({xyz[0]:.2f}, {xyz[1]:.2f}, {xyz[2]:.3f}) m")
 
     fixed_nodes = np.unique(np.array(corner_ids, dtype=int))
-
-    # Connectivity
-    domain.topology.create_connectivity(2, 0)
-    conn = domain.topology.connectivity(2, 0)
-    triangles = np.array([conn.links(i) for i in range(conn.num_nodes)], dtype=int)
-
-    domain.topology.create_connectivity(1, 0)
-    edge_conn = domain.topology.connectivity(1, 0)
-    cables = np.array([edge_conn.links(i) for i in boundary_facets], dtype=int)
 
     print("\n===== Geometry Summary =====")
     print(f"  Domain:          {Lx} m x {Ly} m")
     print(f"  Rise height H:   {H} m")
     print(f"  Grid:            {Nx} x {Ny}")
-    print(f"  Total nodes:     {domain.geometry.x.shape[0]}")
+    print(f"  Total nodes:     {coords.shape[0]}")
     print(f"  Triangles:       {len(triangles)}")
     print(f"  Boundary cables: {len(cables)}")
     print(f"  Fixed nodes:     {len(fixed_nodes)} (corners)")
 
     # Run UWM
     results = run_uwm(
-        coords0=domain.geometry.x.copy(),
+        coords0=coords.copy(),
         triangles=triangles,
         cables=cables,
         fixed_nodes=fixed_nodes,
@@ -630,7 +709,7 @@ def main():
         fill_axis=np.array([0.0, 1.0, 0.0]),
     )
 
-    domain.geometry.x[:] = results["coords"]
+    coords[:] = results["coords"]
 
     sigma_f = results["sigma_fill"]
     sigma_w = results["sigma_warp"]
@@ -646,10 +725,10 @@ def main():
     if cable_forces.size > 0:
         print(f"Mean cable force  (kN): {np.mean(cable_forces):.4f} | std: {np.std(cable_forces):.4f}")
 
-    all_nodes = np.arange(domain.geometry.x.shape[0], dtype=int)
+    all_nodes = np.arange(coords.shape[0], dtype=int)
     free_nodes = np.setdiff1d(all_nodes, fixed_nodes)
     build_plot(
-        coords=domain.geometry.x,
+        coords=coords,
         triangles=triangles,
         cables=cables,
         free_nodes=free_nodes,
