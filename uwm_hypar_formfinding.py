@@ -1,6 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
-import plotly.graph_objects as go
+from matplotlib import pyplot as plt
+from matplotlib.lines import Line2D
 
 try:
     import scipy.sparse as sp
@@ -433,110 +434,89 @@ def run_uwm(
     }
 
 
-def build_plot(
+def build_plot_matplotlib(
     coords: np.ndarray,
     triangles: np.ndarray,
     cables: np.ndarray,
     free_nodes: np.ndarray,
     fixed_nodes: np.ndarray,
     title: str,
-    out_html: str = "hypar_fenicsx_uwm.html",
+    out_png: str = "hypar_fenicsx_uwm_matplotlib.png",
+    show_window: bool = True,
 ):
-    fig = go.Figure()
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
 
-    fig.add_trace(
-        go.Mesh3d(
-            x=coords[:, 0],
-            y=coords[:, 1],
-            z=coords[:, 2],
-            i=triangles[:, 0],
-            j=triangles[:, 1],
-            k=triangles[:, 2],
-            intensity=coords[:, 2],
-            colorscale="RdBu",
-            reversescale=True,
-            opacity=0.60,
-            colorbar=dict(title="Z (m)", thickness=15),
-            name="Membrane surface",
-        )
+    trisurf = ax.plot_trisurf(
+        coords[:, 0],
+        coords[:, 1],
+        coords[:, 2],
+        triangles=triangles,
+        cmap="RdBu_r",
+        alpha=0.60,
+        linewidth=0.25,
+        edgecolor=(0.25, 0.25, 0.25, 0.25),
+        antialiased=True,
     )
-
-    # Mesh wireframe
-    ex, ey, ez = [], [], []
-    for tri in triangles:
-        for a, b in [(0, 1), (1, 2), (2, 0)]:
-            p1, p2 = coords[tri[a]], coords[tri[b]]
-            ex += [p1[0], p2[0], None]
-            ey += [p1[1], p2[1], None]
-            ez += [p1[2], p2[2], None]
-    fig.add_trace(
-        go.Scatter3d(
-            x=ex,
-            y=ey,
-            z=ez,
-            mode="lines",
-            line=dict(color="rgba(70,70,70,0.35)", width=1),
-            name="Mesh edges",
-            hoverinfo="skip",
-        )
-    )
+    cbar = fig.colorbar(trisurf, ax=ax, shrink=0.62, pad=0.07)
+    cbar.set_label("Z (m)")
 
     # Boundary cables
-    cx, cy, cz = [], [], []
     for cab in cables:
         p1, p2 = coords[cab[0]], coords[cab[1]]
-        cx += [p1[0], p2[0], None]
-        cy += [p1[1], p2[1], None]
-        cz += [p1[2], p2[2], None]
-    fig.add_trace(
-        go.Scatter3d(
-            x=cx,
-            y=cy,
-            z=cz,
-            mode="lines",
-            line=dict(color="red", width=4),
-            name="Boundary cables",
+        ax.plot(
+            [p1[0], p2[0]],
+            [p1[1], p2[1]],
+            [p1[2], p2[2]],
+            color="red",
+            linewidth=2.0,
+            alpha=0.95,
         )
-    )
 
     # Free + support nodes
-    fig.add_trace(
-        go.Scatter3d(
-            x=coords[free_nodes, 0],
-            y=coords[free_nodes, 1],
-            z=coords[free_nodes, 2],
-            mode="markers",
-            marker=dict(size=3, color="steelblue"),
-            name="Free nodes",
-        )
+    ax.scatter(
+        coords[free_nodes, 0],
+        coords[free_nodes, 1],
+        coords[free_nodes, 2],
+        s=8,
+        c="steelblue",
+        depthshade=True,
     )
-    fig.add_trace(
-        go.Scatter3d(
-            x=coords[fixed_nodes, 0],
-            y=coords[fixed_nodes, 1],
-            z=coords[fixed_nodes, 2],
-            mode="markers",
-            marker=dict(size=6, color="black"),
-            name="Fixed support nodes",
-        )
+    ax.scatter(
+        coords[fixed_nodes, 0],
+        coords[fixed_nodes, 1],
+        coords[fixed_nodes, 2],
+        s=35,
+        c="black",
+        depthshade=True,
     )
 
-    fig.update_layout(
-        title=title,
-        scene=dict(
-            xaxis=dict(title="X (m)"),
-            yaxis=dict(title="Y (m)"),
-            zaxis=dict(title="Z (m)"),
-            aspectmode="data",
-            camera=dict(eye=dict(x=1.5, y=-1.8, z=1.2)),
-        ),
-        margin=dict(l=0, r=0, t=70, b=0),
-        legend=dict(x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.75)"),
-        height=700,
-    )
+    ax.set_title(title)
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.view_init(elev=30, azim=-50)
 
-    fig.write_html(out_html)
-    print(f"Saved interactive plot -> {out_html}")
+    span = np.ptp(coords, axis=0)
+    span = np.maximum(span, 1e-9)
+    ax.set_box_aspect(span)
+
+    legend_handles = [
+        Line2D([0], [0], color="red", lw=2, label="Boundary cables"),
+        Line2D([0], [0], marker="o", color="steelblue", linestyle="", label="Free nodes"),
+        Line2D([0], [0], marker="o", color="black", linestyle="", label="Fixed support nodes"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=180)
+    print(f"Saved Matplotlib plot -> {out_png}")
+    print("Rotate interactively with mouse while the Matplotlib window is open.")
+
+    if show_window:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def build_structured_rectangle_mesh(
@@ -727,7 +707,7 @@ def main():
 
     all_nodes = np.arange(coords.shape[0], dtype=int)
     free_nodes = np.setdiff1d(all_nodes, fixed_nodes)
-    build_plot(
+    build_plot_matplotlib(
         coords=coords,
         triangles=triangles,
         cables=cables,
@@ -737,7 +717,8 @@ def main():
             f"UWM form-found hypar | target (fill,warp)=({settings.target_sigma_fill},"
             f" {settings.target_sigma_warp}) kN/m, cable={settings.target_cable_force} kN"
         ),
-        out_html="hypar_fenicsx_uwm.html",
+        out_png="hypar_fenicsx_uwm_matplotlib.png",
+        show_window=True,
     )
 
 
