@@ -35,7 +35,7 @@ class ConicExample1Settings:
     # Form-finding controls
     max_outer_iterations: int = 40
     stress_tolerance: float = 1e-4
-    distortion_limit: float = 1.2
+    distortion_limit: float = 1.1
     relax_distorted_elements: bool = True
     optimise_xyz: bool = False  # keep plan projection fixed for stability
     min_weight: float = 1e-12
