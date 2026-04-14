@@ -37,7 +37,8 @@ class TwinHyparSettings:
     stress_tolerance: float = 1e-4
     distortion_limit: float = 1.2
     relax_distorted_elements: bool = True
-    optimise_xyz: bool = True
+    # Keep XY fixed by default for stability in this FDM/UWM setup.
+    optimise_xyz: bool = False
     min_weight: float = 1e-12
 
     # Material properties (stored and reported for traceability)
@@ -348,6 +349,18 @@ def run_uwm(
             optimise_xyz=settings.optimise_xyz,
         )
 
+        # Guard against element collapse/inversion after the linear solve.
+        # If detected, pull the update halfway back to the previous geometry.
+        new_areas = element_areas(coords_eq, triangles)
+        if np.min(new_areas) < 1e-12:
+            coords_eq = 0.5 * (coords_ref + coords_eq)
+            new_areas = element_areas(coords_eq, triangles)
+            if np.min(new_areas) < 1e-12:
+                raise RuntimeError(
+                    "Degenerate triangles detected during iteration. "
+                    "Try smaller prestress/cable force or keep optimise_xyz=False."
+                )
+
         sigma_fill_eq, sigma_warp_eq, area_eq = compute_equilibrium_stresses(
             coords=coords_eq,
             triangles=triangles,
@@ -445,12 +458,16 @@ def build_structured_rectangle_mesh(Lx: float, Ly: float, Nx: int, Ny: int):
 
 
 def locate_support_nodes(coords: np.ndarray, support_xy: np.ndarray) -> np.ndarray:
+    # Preserve support order so each support keeps its intended high/low Z value.
     ids = []
     xy_nodes = coords[:, :2]
     for xy in support_xy:
         dist2 = np.sum((xy_nodes - xy[None, :]) ** 2, axis=1)
         ids.append(int(np.argmin(dist2)))
-    return np.unique(np.array(ids, dtype=int))
+    ids = np.array(ids, dtype=int)
+    if np.unique(ids).size != ids.size:
+        raise ValueError("Multiple support points mapped to the same mesh node. Increase mesh density.")
+    return ids
 
 
 def idw_initial_surface(
@@ -487,7 +504,11 @@ def build_plot(
     out_html: str = "twin_hypar_formfound.html",
 ):
     if not HAVE_PLOTLY:
-        raise RuntimeError("Plotly is required for interactive HTML plotting.")
+        print(
+            "Plotly is not installed in this environment. "
+            "Skipping interactive HTML plot generation."
+        )
+        return
 
     all_nodes = np.arange(coords.shape[0], dtype=int)
     free_nodes = np.setdiff1d(all_nodes, fixed_nodes)
@@ -590,9 +611,16 @@ def main():
     z_low = -0.5 * settings.height_difference
     support_z = np.array([z_high, z_low, z_high, z_low, z_high, z_low], dtype=float)
 
-    fixed_nodes = locate_support_nodes(coords, support_xy)
+    # Preserve support order to keep high/low assignment aligned with support_xy.
+    support_ids_ordered = []
+    xy_nodes = coords[:, :2]
+    for xy in support_xy:
+        dist2 = np.sum((xy_nodes - xy[None, :]) ** 2, axis=1)
+        support_ids_ordered.append(int(np.argmin(dist2)))
+    support_ids_ordered = np.array(support_ids_ordered, dtype=int)
+    fixed_nodes = np.unique(support_ids_ordered)
     coords[:, 2] = idw_initial_surface(coords, support_xy, support_z, power=2.0)
-    coords[fixed_nodes, 2] = support_z
+    coords[support_ids_ordered, 2] = support_z
 
     if settings.target_cable_force is None:
         settings.target_cable_force = estimate_cable_force_from_material(settings)
