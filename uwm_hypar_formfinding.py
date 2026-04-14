@@ -608,7 +608,6 @@ def build_plot_matplotlib(
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
     ax.view_init(elev=30, azim=-50)
-
     span = np.ptp(coords, axis=0)
     span = np.maximum(span, 1e-9)
     ax.set_box_aspect(span)
