@@ -1,7 +1,5 @@
 import numpy as np
 from dataclasses import dataclass
-from matplotlib import pyplot as plt
-from matplotlib.lines import Line2D
 try:
     import plotly.graph_objects as go
     HAVE_PLOTLY = True
@@ -439,7 +437,7 @@ def run_uwm(
     }
 
 
-def build_plot_interactive(
+def build_plot(
     coords: np.ndarray,
     triangles: np.ndarray,
     cables: np.ndarray,
@@ -448,6 +446,9 @@ def build_plot_interactive(
     title: str,
     out_html: str = "hypar_fenicsx_uwm_interactive.html",
 ):
+    if not HAVE_PLOTLY:
+        raise RuntimeError("Plotly is required for interactive HTML plotting.")
+
     fig = go.Figure()
 
     fig.add_trace(
@@ -544,90 +545,6 @@ def build_plot_interactive(
     fig.write_html(out_html, include_plotlyjs="cdn")
     print(f"Saved interactive Plotly HTML -> {out_html}")
     print("Open the HTML in a browser to rotate/pan/zoom interactively.")
-
-
-def build_plot_matplotlib(
-    coords: np.ndarray,
-    triangles: np.ndarray,
-    cables: np.ndarray,
-    free_nodes: np.ndarray,
-    fixed_nodes: np.ndarray,
-    title: str,
-    out_png: str = "hypar_fenicsx_uwm_matplotlib.png",
-    show_window: bool = True,
-):
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    trisurf = ax.plot_trisurf(
-        coords[:, 0],
-        coords[:, 1],
-        coords[:, 2],
-        triangles=triangles,
-        cmap="RdBu_r",
-        alpha=0.60,
-        linewidth=0.25,
-        edgecolor=(0.25, 0.25, 0.25, 0.25),
-        antialiased=True,
-    )
-    cbar = fig.colorbar(trisurf, ax=ax, shrink=0.62, pad=0.07)
-    cbar.set_label("Z (m)")
-
-    # Boundary cables
-    for cab in cables:
-        p1, p2 = coords[cab[0]], coords[cab[1]]
-        ax.plot(
-            [p1[0], p2[0]],
-            [p1[1], p2[1]],
-            [p1[2], p2[2]],
-            color="red",
-            linewidth=2.0,
-            alpha=0.95,
-        )
-
-    # Free + support nodes
-    ax.scatter(
-        coords[free_nodes, 0],
-        coords[free_nodes, 1],
-        coords[free_nodes, 2],
-        s=8,
-        c="steelblue",
-        depthshade=True,
-    )
-    ax.scatter(
-        coords[fixed_nodes, 0],
-        coords[fixed_nodes, 1],
-        coords[fixed_nodes, 2],
-        s=35,
-        c="black",
-        depthshade=True,
-    )
-
-    ax.set_title(title)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.view_init(elev=30, azim=-50)
-    span = np.ptp(coords, axis=0)
-    span = np.maximum(span, 1e-9)
-    ax.set_box_aspect(span)
-
-    legend_handles = [
-        Line2D([0], [0], color="red", lw=2, label="Boundary cables"),
-        Line2D([0], [0], marker="o", color="steelblue", linestyle="", label="Free nodes"),
-        Line2D([0], [0], marker="o", color="black", linestyle="", label="Fixed support nodes"),
-    ]
-    ax.legend(handles=legend_handles, loc="upper left")
-
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=180)
-    print(f"Saved Matplotlib plot -> {out_png}")
-    print("Rotate interactively with mouse while the Matplotlib window is open.")
-
-    if show_window:
-        plt.show()
-    else:
-        plt.close(fig)
 
 
 def build_structured_rectangle_mesh(
@@ -822,28 +739,15 @@ def main():
         f"UWM form-found hypar | target (fill,warp)=({settings.target_sigma_fill},"
         f" {settings.target_sigma_warp}) kN/m, cable={settings.target_cable_force} kN"
     )
-    if HAVE_PLOTLY:
-        build_plot_interactive(
-            coords=coords,
-            triangles=triangles,
-            cables=cables,
-            free_nodes=free_nodes,
-            fixed_nodes=fixed_nodes,
-            title=plot_title,
-            out_html="hypar_fenicsx_uwm_interactive.html",
-        )
-    else:
-        print("Plotly not available, falling back to Matplotlib interactive window.")
-        build_plot_matplotlib(
-            coords=coords,
-            triangles=triangles,
-            cables=cables,
-            free_nodes=free_nodes,
-            fixed_nodes=fixed_nodes,
-            title=plot_title,
-            out_png="hypar_fenicsx_uwm_matplotlib.png",
-            show_window=True,
-        )
+    build_plot(
+        coords=coords,
+        triangles=triangles,
+        cables=cables,
+        free_nodes=free_nodes,
+        fixed_nodes=fixed_nodes,
+        title=plot_title,
+        out_html="hypar_fenicsx_uwm.html",
+    )
 
 
 if __name__ == "__main__":
