@@ -2,6 +2,11 @@ import numpy as np
 from dataclasses import dataclass
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
+try:
+    import plotly.graph_objects as go
+    HAVE_PLOTLY = True
+except Exception:
+    HAVE_PLOTLY = False
 
 try:
     import scipy.sparse as sp
@@ -434,6 +439,113 @@ def run_uwm(
     }
 
 
+def build_plot_interactive(
+    coords: np.ndarray,
+    triangles: np.ndarray,
+    cables: np.ndarray,
+    free_nodes: np.ndarray,
+    fixed_nodes: np.ndarray,
+    title: str,
+    out_html: str = "hypar_fenicsx_uwm_interactive.html",
+):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Mesh3d(
+            x=coords[:, 0],
+            y=coords[:, 1],
+            z=coords[:, 2],
+            i=triangles[:, 0],
+            j=triangles[:, 1],
+            k=triangles[:, 2],
+            intensity=coords[:, 2],
+            colorscale="RdBu",
+            reversescale=True,
+            opacity=0.60,
+            colorbar=dict(title="Z (m)", thickness=15),
+            name="Membrane surface",
+        )
+    )
+
+    # Mesh wireframe
+    ex, ey, ez = [], [], []
+    for tri in triangles:
+        for a, b in [(0, 1), (1, 2), (2, 0)]:
+            p1, p2 = coords[tri[a]], coords[tri[b]]
+            ex += [p1[0], p2[0], None]
+            ey += [p1[1], p2[1], None]
+            ez += [p1[2], p2[2], None]
+    fig.add_trace(
+        go.Scatter3d(
+            x=ex,
+            y=ey,
+            z=ez,
+            mode="lines",
+            line=dict(color="rgba(70,70,70,0.35)", width=1),
+            name="Mesh edges",
+            hoverinfo="skip",
+        )
+    )
+
+    # Boundary cables
+    cx, cy, cz = [], [], []
+    for cab in cables:
+        p1, p2 = coords[cab[0]], coords[cab[1]]
+        cx += [p1[0], p2[0], None]
+        cy += [p1[1], p2[1], None]
+        cz += [p1[2], p2[2], None]
+    fig.add_trace(
+        go.Scatter3d(
+            x=cx,
+            y=cy,
+            z=cz,
+            mode="lines",
+            line=dict(color="red", width=4),
+            name="Boundary cables",
+        )
+    )
+
+    # Free + support nodes
+    fig.add_trace(
+        go.Scatter3d(
+            x=coords[free_nodes, 0],
+            y=coords[free_nodes, 1],
+            z=coords[free_nodes, 2],
+            mode="markers",
+            marker=dict(size=3, color="steelblue"),
+            name="Free nodes",
+        )
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=coords[fixed_nodes, 0],
+            y=coords[fixed_nodes, 1],
+            z=coords[fixed_nodes, 2],
+            mode="markers",
+            marker=dict(size=6, color="black"),
+            name="Fixed support nodes",
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis=dict(title="X (m)"),
+            yaxis=dict(title="Y (m)"),
+            zaxis=dict(title="Z (m)"),
+            aspectmode="data",
+            camera=dict(eye=dict(x=1.5, y=-1.8, z=1.2)),
+        ),
+        margin=dict(l=0, r=0, t=70, b=0),
+        legend=dict(x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.75)"),
+        height=700,
+    )
+
+    fig.write_html(out_html, include_plotlyjs="cdn")
+    print(f"Saved interactive Plotly HTML -> {out_html}")
+    print("Open the HTML in a browser to rotate/pan/zoom interactively.")
+
+
 def build_plot_matplotlib(
     coords: np.ndarray,
     triangles: np.ndarray,
@@ -707,19 +819,32 @@ def main():
 
     all_nodes = np.arange(coords.shape[0], dtype=int)
     free_nodes = np.setdiff1d(all_nodes, fixed_nodes)
-    build_plot_matplotlib(
-        coords=coords,
-        triangles=triangles,
-        cables=cables,
-        free_nodes=free_nodes,
-        fixed_nodes=fixed_nodes,
-        title=(
-            f"UWM form-found hypar | target (fill,warp)=({settings.target_sigma_fill},"
-            f" {settings.target_sigma_warp}) kN/m, cable={settings.target_cable_force} kN"
-        ),
-        out_png="hypar_fenicsx_uwm_matplotlib.png",
-        show_window=True,
+    plot_title = (
+        f"UWM form-found hypar | target (fill,warp)=({settings.target_sigma_fill},"
+        f" {settings.target_sigma_warp}) kN/m, cable={settings.target_cable_force} kN"
     )
+    if HAVE_PLOTLY:
+        build_plot_interactive(
+            coords=coords,
+            triangles=triangles,
+            cables=cables,
+            free_nodes=free_nodes,
+            fixed_nodes=fixed_nodes,
+            title=plot_title,
+            out_html="hypar_fenicsx_uwm_interactive.html",
+        )
+    else:
+        print("Plotly not available, falling back to Matplotlib interactive window.")
+        build_plot_matplotlib(
+            coords=coords,
+            triangles=triangles,
+            cables=cables,
+            free_nodes=free_nodes,
+            fixed_nodes=fixed_nodes,
+            title=plot_title,
+            out_png="hypar_fenicsx_uwm_matplotlib.png",
+            show_window=True,
+        )
 
 
 if __name__ == "__main__":
