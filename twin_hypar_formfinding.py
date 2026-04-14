@@ -25,11 +25,11 @@ class TwinHyparSettings:
     height_difference: float = 4.0  # high - low support level (m)
 
     # Prestress targets (kN/m)
-    target_sigma_warp: float = 50.0
+    target_sigma_warp: float = 5.0
     target_sigma_fill: float = 5.0
 
     # Cable target force (kN). If None, estimated from cable material + strain.
-    target_cable_force: float | None = None
+    target_cable_force: float | None = 50.0
     cable_prestress_strain: float = 0.002
 
     # UWM controls
