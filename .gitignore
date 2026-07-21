@@ -1,0 +1,7 @@
+# Generated interactive Plotly outputs
+*.html
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
